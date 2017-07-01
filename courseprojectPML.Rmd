@@ -1,0 +1,133 @@
+---
+title: "Course Project Practical Machine Learning"
+author: "C. Roelofs"
+date: "30 juni 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(rpart)
+library(randomForest)
+```
+
+```{r load data}
+# omit first column as this is just a row number
+training <- read.csv('pml-training.csv',na.strings = c('#DIV/0!', 'NA'))[, 2:160]
+testing <- read.csv('pml-testing.csv', na.strings = c('#DIV/0!', 'NA'))[, 2:160]
+testing$problem_id <- as.factor(testing$problem_id)
+```
+
+## Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement of a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+The data used in this project is from http://groupware.les.inf.puc-rio.br/har .
+
+The data set consists of a training and a testset which we will use to predict the manner in which they did the execise.
+
+The 'manner in which the person did their exercise'-categories are:
+```{r classes}
+table(training$classe)
+```
+What these classes mean is describes on the website mentioned above.
+
+## Exploratory analysis 
+The dataset contains 158 (possible predictors) and the class variable which we will try to predict. There are 6 logical, 71 factor, 28 integer and 54 numeric variables. When printing the summary we find that there are a couple of variables that have a very high amount of nan's, there are 100(!) variables which mostly (>95%) contain nan's. 
+
+```{r nans}
+na_perc <- sapply(training, function(y) sum( is.na(y) )/length(y) )
+nan_cols <- names(na_perc[na_perc > .95])
+sum(na_perc > .95)
+```
+We could ignore these, but if they mostly are filled for a certain classe these variables might still have some predictive power. 
+```{r nans2}
+ff<- training[c(nan_cols,"classe")]
+table(ff[rowSums(is.na(ff)) != ncol(ff)-1, "classe"])
+```
+However, that does not seem to be the case, so we may as well ignore these variables when building the initial model.
+
+There are still a couple of variables which do not have anything to do with the classe-variable. These are the time windows and the user names. These are also removed from the data sets.
+
+```{r transform}
+training <- training[, !names(training) %in% nan_cols]
+testing <- testing[, !names(testing) %in% nan_cols]
+training <- training[, 7:ncol(training)]
+testing <- testing[, 7:ncol(testing)]
+```
+
+This leaves us with only 53 variables, and will save us a lot of time building the models.
+
+## Model building
+The testset contains 20 observations which is used for grading and does not have the 'classe'-labels. Therefore we will split the training data in a actual training and a validation set which we will use for testing and to determine the out of sample error.
+```{r splitdata}
+inTrain <- createDataPartition(training$classe,p = 3/4, list = FALSE)
+trainSet <- training[inTrain,]
+valSet <- training[-inTrain,]
+dim(trainSet) ; dim(valSet)
+```
+
+First we try a decision tree with the rpart package. To avoid overfitting, we will use 5-fold cross validation.
+```{r tree, cache=TRUE}
+tc <- trainControl(method='cv', number=5)
+treemodel <- train(classe~., data = trainSet, method = 'rpart', trControl = tc)
+treemodel
+```
+
+We find that the accuracy of this model is only 53%, so let's find out whether a random forest will perform better. Since this model already took quite a while to calculate we will preprocess the data a bit more, by using a PCA on the dataset.
+
+```{r preprocess}
+pp_obj <- preProcess(trainSet[-ncol(trainSet)],method='pca')
+trainSetpp <- predict(pp_obj,trainSet)
+valSetpp <- predict(pp_obj, valSet)
+dim(trainSetpp) ; dim(valSetpp)
+```
+We see that only 25 predictors are necessary to retain 95% of the variance. So we will try to train the random forest with only these 25 preductors. In this case we will also use cross validation to avoid overfitting.
+
+```{r rf, cache=TRUE}
+rfmodel <- train(classe~., data = trainSetpp, method = 'rf', trControl = tc, importance=TRUE)
+rfmodel
+```
+
+The final model has a very high accuracy for the training data and an in sample error of 0, so it might be a case of overfitting...
+
+```{r cm}
+train_pred_rf <- predict(rfmodel, newdata=trainSetpp)
+confusionMatrix(trainSetpp$classe, train_pred_rf)
+```
+
+## Interpretation
+Of the 53 input variables, we would like to know which variables were most important or the model. These are shown below.
+```{r imp}
+varImp(rfmodel)
+```
+However these variables are a bit hard to interpret because of the PCA. However we can find, by looking at the correlation between the PCA-vectors and the original variables which variables contributes most to PC8. 
+```{r corrs}
+cormat = matrix(nrow = ncol(trainSet)-1, ncol = ncol(trainSetpp)-1)
+for(i in 1:(ncol(trainSet)-1)) { 
+        for(j in 1:(ncol(trainSetpp)-1)) { 
+                cormat[i,j] = cor(trainSet[,i],trainSetpp[,j+1]) 
+        } 
+}
+names(trainSet)[which.max(abs(cormat[,8]))];names(trainSet)[which.max(abs(cormat[,1]))];names(trainSet)[which.max(abs(cormat[,13]))]
+```
+So, the variance of PC8 is mostly explained by the variance of the 'magnet_forearm_x'-variable. PC1 is mostly correlated to 'accel_belt_y' and PC13 mostly to 'total_accel_forearm'. 
+
+## Final model and expected out of sample error
+First have a look at the confusion matrix or the validation set:
+```{r cm2}
+train_pred_val <- predict(rfmodel, newdata=valSetpp)
+confusionMatrix(valSet$classe, train_pred_val)
+```
+
+Even on the validation set, we see that almost all values are predicted correct. The accuracy around 97,1%. Very high. The out of sample error is thus about 2,9%.
+
+## Results on test set
+The predictions for the testset are:
+```{r rfontest}
+testSetpp <- predict(pp_obj, testing[])
+pred_test <- predict(rfmodel, newdata<-testSetpp)
+cbind('problemid' = testSetpp$problem_id, as.character(pred_test))
+```
+
+Accoring to the grading, 2 were incorrect, so a 10% error. 
